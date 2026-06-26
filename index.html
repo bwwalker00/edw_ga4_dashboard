@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GA4 주간 유입 대시보드</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2"></script>
+  <style>
+    body { margin:0; font-family:Arial,'Noto Sans KR',sans-serif; background:#f3f5f8; color:#111827; }
+    header { background:#111827; color:white; padding:20px 28px; }
+    header h1 { margin:0 0 8px; font-size:28px; }
+    header p { margin:0; color:#cbd5e1; }
+    .wrap { padding:24px; }
+    .panel, .card, .chart-box { background:white; border-radius:18px; padding:20px; box-shadow:0 8px 24px rgba(0,0,0,.06); }
+    .panel { display:flex; justify-content:space-between; align-items:end; margin-bottom:20px; gap:16px; flex-wrap:wrap; }
+    select, button { padding:12px 16px; border-radius:10px; border:1px solid #cbd5e1; font-size:15px; }
+    button { background:#111827; color:white; cursor:pointer; font-weight:700; }
+    .error { color:#b91c1c; font-weight:700; margin-top:12px; }
+    .cards { display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:20px; }
+    .card-title { color:#64748b; font-weight:700; font-size:14px; }
+    .card-value { margin-top:18px; font-size:24px; font-weight:800; }
+    .charts { display:grid; grid-template-columns:1fr 1.3fr; gap:20px; margin-bottom:20px; }
+    .chart-box h2 { font-size:18px; margin:0 0 16px; }
+    .chart-head { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:12px; }
+    .chart-head h2 { margin:0; }
+    .pie-chart-box { display:flex; flex-direction:column; }
+    .pie-canvas-wrap { height:420px; max-height:420px; position:relative; }
+    .small-label { font-size:13px; color:#64748b; font-weight:700; margin-right:6px; }
+    table { width:100%; border-collapse:collapse; background:white; border-radius:14px; overflow:hidden; }
+    th, td { padding:12px; border-bottom:1px solid #e5e7eb; text-align:left; font-size:14px; }
+    th { background:#f8fafc; }
+    @media (max-width: 900px) {
+      .cards { grid-template-columns:1fr 1fr; }
+      .pie-canvas-wrap { height:360px; max-height:360px; }
+      .charts { grid-template-columns:1fr; }
+    }
+  </style>
+</head>
+<body>
+<header>
+  <h1>GA4 주간 유입 대시보드</h1>
+  <p>Apps Script 웹앱 API에서 GA4 데이터를 받아 브라우저에서 집계합니다.</p>
+</header>
+
+<div class="wrap">
+  <div class="panel">
+    <div>
+      <label><b>과정 선택</b></label><br><br>
+      <select id="propertySelect"></select>
+      <div id="error" class="error"></div>
+    </div>
+    <div>
+      <button onclick="loadDashboard()">데이터 새로고침</button>
+      <button onclick="downloadCSV()">CSV 다운로드</button>
+    </div>
+  </div>
+
+  <div class="cards">
+    <div class="card">
+      <div class="card-title">선택 과정</div>
+      <div id="courseName" class="card-value">-</div>
+    </div>
+    <div class="card">
+      <div class="card-title">직전 주 광고 채널의 세션 수</div>
+      <div id="weekAdSessions" class="card-value">-</div>
+    </div>
+    <div class="card">
+      <div class="card-title">최근 3개월 광고 채널 세션 수 평균</div>
+      <div id="threeMonthAdAvg" class="card-value">-</div>
+    </div>
+    <div class="card">
+      <div class="card-title">마지막 갱신</div>
+      <div id="updatedAt" class="card-value">-</div>
+    </div>
+  </div>
+
+  <div class="charts">
+    <div class="chart-box pie-chart-box">
+      <h2>직전 주 채널 비중</h2>
+      <div class="pie-canvas-wrap">
+        <canvas id="pieChart"></canvas>
+      </div>
+    </div>
+    <div class="chart-box">
+      <div class="chart-head">
+        <h2>최근 주차별 유입 추이</h2>
+        <div>
+          <span class="small-label">채널 선택</span>
+          <select id="trendChannelSelect" onchange="renderLine(rawRows)"></select>
+        </div>
+      </div>
+      <canvas id="lineChart"></canvas>
+    </div>
+  </div>
+
+  <div class="chart-box">
+    <h2>직전 주 채널별 표</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>채널</th>
+          <th>세션</th>
+          <th>비중</th>
+          <th>최근 3개월 세션 수 평균</th>
+        </tr>
+      </thead>
+      <tbody id="weeklyTable"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+  // TODO: 여기에 Apps Script 웹앱 /exec URL을 넣으세요.
+  const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzW2gXhfj1SiJT-z9IbKJMulIo8seROlq_8zDpRZce3vbfoFOMAXPzJDAILmmtNpkqx4w/exec';
+
+  let rawRows = [];
+  let pieChart = null;
+  let lineChart = null;
+
+  if (window.ChartDataLabels) {
+    Chart.register(ChartDataLabels);
+  }
+
+  window.onload = async function () {
+    await loadProperties();
+  };
+
+  async function fetchJsonp(url) {
+    return new Promise((resolve, reject) => {
+      const callbackName = 'jsonpCallback_' + Date.now();
+      const script = document.createElement('script');
+
+      window[callbackName] = data => {
+        delete window[callbackName];
+        script.remove();
+        resolve(data);
+      };
+
+      script.src = url + (url.includes('?') ? '&' : '?') + 'callback=' + callbackName;
+      script.onerror = () => {
+        delete window[callbackName];
+        script.remove();
+        reject(new Error('Apps Script API 호출에 실패했습니다. 웹앱 URL과 배포 권한을 확인하세요.'));
+      };
+      document.body.appendChild(script);
+    });
+  }
+
+  async function loadProperties() {
+    try {
+      clearError();
+
+      const data = await fetchJsonp(`${APPS_SCRIPT_URL}?action=properties`);
+      if (!data.ok) throw new Error(data.message);
+
+      const select = document.getElementById('propertySelect');
+      select.innerHTML = '';
+
+      data.properties.forEach(item => {
+        const option = document.createElement('option');
+        option.value = item.propertyId;
+        option.textContent = item.name;
+        select.appendChild(option);
+      });
+
+      await loadDashboard();
+    } catch (err) {
+      showError('과정 목록 로드 실패: ' + err.message);
+    }
+  }
+
+  async function loadDashboard() {
+    try {
+      clearError();
+
+      const propertyId = document.getElementById('propertySelect').value;
+      const data = await fetchJsonp(`${APPS_SCRIPT_URL}?action=report&propertyId=${propertyId}`);
+      if (!data.ok) throw new Error(data.message);
+
+      rawRows = data.rows || [];
+      renderDashboard(data);
+    } catch (err) {
+      showError('데이터 로드 실패: ' + err.message);
+    }
+  }
+
+  function renderDashboard(data) {
+    document.getElementById('courseName').textContent = data.propertyName || '-';
+    document.getElementById('updatedAt').textContent = formatDateTime(data.updatedAt);
+
+    const latestWeek = getLatestWeek(rawRows);
+    const latestRows = rawRows.filter(row => row.weekStart === latestWeek);
+
+    const channelSummary = summarizeByChannel(latestRows);
+    const totalSessions = channelSummary.reduce((sum, row) => sum + row.sessions, 0);
+    const adSummary = channelSummary.find(row => row.channel === '광고');
+    const adSessions = adSummary ? adSummary.sessions : 0;
+    const threeMonthAvgMap = calculateRecentThreeMonthWeeklyAverageByChannel(rawRows, data.updatedAt);
+    const adAverage = threeMonthAvgMap['광고'] || 0;
+
+    document.getElementById('weekAdSessions').textContent = adSessions.toLocaleString();
+    document.getElementById('threeMonthAdAvg').textContent = formatNumber(adAverage);
+
+    renderTrendChannelOptions(rawRows);
+    renderTable(channelSummary, totalSessions, threeMonthAvgMap);
+    renderPie(channelSummary);
+    renderLine(rawRows);
+  }
+
+  function getLatestWeek(rows) {
+    const weeks = [...new Set(rows.map(row => row.weekStart))].filter(Boolean).sort();
+    return weeks[weeks.length - 1];
+  }
+
+  function summarizeByChannel(rows) {
+    const map = {};
+
+    rows.forEach(row => {
+      const channel = row.channel || '기타';
+      map[channel] = (map[channel] || 0) + Number(row.sessions || 0);
+    });
+
+    return Object.entries(map)
+      .map(([channel, sessions]) => ({ channel, sessions }))
+      .sort((a, b) => b.sessions - a.sessions);
+  }
+
+  function calculateRecentThreeMonthWeeklyAverageByChannel(rows, updatedAt) {
+    const endDate = updatedAt ? new Date(updatedAt) : new Date();
+    const startDate = new Date(endDate);
+    startDate.setMonth(startDate.getMonth() - 3);
+
+    const filteredRows = rows.filter(row => {
+      if (!row.date) return false;
+      const rowDate = parseDate(row.date);
+      return rowDate >= startDate && rowDate <= endDate;
+    });
+
+    const weeks = [...new Set(filteredRows.map(row => row.weekStart).filter(Boolean))].sort();
+    const weekCount = weeks.length || 1;
+    const totalByChannel = {};
+
+    filteredRows.forEach(row => {
+      const channel = row.channel || '기타';
+      totalByChannel[channel] = (totalByChannel[channel] || 0) + Number(row.sessions || 0);
+    });
+
+    const averageMap = {};
+    Object.keys(totalByChannel).forEach(channel => {
+      averageMap[channel] = totalByChannel[channel] / weekCount;
+    });
+
+    return averageMap;
+  }
+
+  function parseDate(dateString) {
+    const parts = String(dateString).split('-').map(Number);
+    return new Date(parts[0], parts[1] - 1, parts[2]);
+  }
+
+
+  function renderTrendChannelOptions(rows) {
+    const select = document.getElementById('trendChannelSelect');
+    const previousValue = select.value;
+    const channels = [...new Set(rows.map(row => row.channel || '기타'))].sort();
+
+    select.innerHTML = '';
+
+    channels.forEach(channel => {
+      const option = document.createElement('option');
+      option.value = channel;
+      option.textContent = channel;
+      select.appendChild(option);
+    });
+
+    // 디폴트는 광고. 기존 선택값이 있으면 유지.
+    if (previousValue && channels.includes(previousValue)) {
+      select.value = previousValue;
+    } else if (channels.includes('광고')) {
+      select.value = '광고';
+    } else if (channels.length > 0) {
+      select.value = channels[0];
+    }
+  }
+
+  function renderTable(rows, total, averageMap = {}) {
+    const tbody = document.getElementById('weeklyTable');
+    tbody.innerHTML = '';
+
+    rows.forEach(row => {
+      const ratio = total > 0 ? row.sessions / total : 0;
+      const threeMonthAverage = averageMap[row.channel] || 0;
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${row.channel}</td>
+        <td>${row.sessions.toLocaleString()}</td>
+        <td>${(ratio * 100).toFixed(1)}%</td>
+        <td>${formatNumber(threeMonthAverage)}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  function renderPie(rows) {
+    const ctx = document.getElementById('pieChart');
+    if (pieChart) pieChart.destroy();
+
+    const total = rows.reduce((sum, row) => sum + Number(row.sessions || 0), 0);
+
+    pieChart = new Chart(ctx, {
+      type: 'doughnut',
+      data: {
+        labels: rows.map(row => row.channel),
+        datasets: [{ data: rows.map(row => row.sessions) }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { position: 'right' },
+          tooltip: {
+            callbacks: {
+              label: context => {
+                const value = Number(context.raw || 0);
+                const ratio = total > 0 ? (value / total * 100).toFixed(1) : '0.0';
+                return `${context.label}: ${value.toLocaleString()} (${ratio}%)`;
+              }
+            }
+          },
+          datalabels: {
+            display: context => {
+              const value = Number(context.dataset.data[context.dataIndex] || 0);
+              return total > 0 && value / total >= 0.03;
+            },
+            formatter: (value) => {
+              const ratio = total > 0 ? (Number(value) / total * 100).toFixed(1) : '0.0';
+              return `${Number(value).toLocaleString()}\n${ratio}%`;
+            },
+            font: {
+              weight: '700',
+              size: 12
+            },
+            color: '#111827',
+            textAlign: 'center'
+          }
+        }
+      }
+    });
+  }
+
+  function renderLine(rows) {
+    const selectedChannel = document.getElementById('trendChannelSelect').value || '광고';
+    const filteredRows = rows.filter(row => (row.channel || '기타') === selectedChannel);
+    const weekMap = {};
+
+    filteredRows.forEach(row => {
+      const weekStart = row.weekStart || '';
+      if (!weekStart) return;
+
+      if (!weekMap[weekStart]) {
+        weekMap[weekStart] = {
+          label: row.weekLabel || weekStart,
+          sessions: 0
+        };
+      }
+
+      weekMap[weekStart].sessions += Number(row.sessions || 0);
+    });
+
+    const sortedWeeks = Object.keys(weekMap).sort((a, b) => a.localeCompare(b));
+    const labels = sortedWeeks.map(weekStart => weekMap[weekStart].label);
+    const values = sortedWeeks.map(weekStart => weekMap[weekStart].sessions);
+    const ctx = document.getElementById('lineChart');
+
+    if (lineChart) lineChart.destroy();
+
+    lineChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [{
+          label: `${selectedChannel} 세션 수`,
+          data: values,
+          tension: 0.35,
+          pointRadius: 5
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: {
+          legend: { display: true },
+          datalabels: { display: false }
+        },
+        scales: { y: { beginAtZero: true } }
+      }
+    });
+  }
+
+  function downloadCSV() {
+    if (!rawRows.length) {
+      alert('다운로드할 데이터가 없습니다.');
+      return;
+    }
+
+    const header = [
+      '과정명', '속성ID', '일자', '주차시작', '주차종료',
+      '주차', 'source', 'medium', 'sourceMedium', '채널', '세션'
+    ];
+
+    const rows = rawRows.map(row => [
+      row.propertyName,
+      row.propertyId,
+      row.date,
+      row.weekStart,
+      row.weekEnd,
+      row.weekLabel,
+      row.source,
+      row.medium,
+      row.sourceMedium,
+      row.channel,
+      row.sessions
+    ]);
+
+    const csv = [header, ...rows]
+      .map(line => line.map(value => `"${String(value ?? '').replace(/"/g, '""')}"`).join(','))
+      .join('\n');
+
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'ga4_dashboard.csv';
+    a.click();
+
+    URL.revokeObjectURL(url);
+  }
+
+  function formatNumber(value) {
+    return Math.round(Number(value || 0)).toLocaleString();
+  }
+
+  function formatDateTime(value) {
+    if (!value) return '-';
+    const date = new Date(value);
+    return date.toLocaleString('ko-KR');
+  }
+
+  function showError(message) {
+    document.getElementById('error').textContent = message;
+  }
+
+  function clearError() {
+    document.getElementById('error').textContent = '';
+  }
+</script>
+</body>
+</html>
